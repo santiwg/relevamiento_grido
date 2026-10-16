@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <!-- Pensada para celular: ocupa todo el ancho, respeta la muesca y no permite el zoom accidental -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="color-scheme" content="dark">
+
+  <!-- Para que al instalarla en la pantalla de inicio se abra como una app (iPhone y Android) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Relevamiento">
+
+  <title>Relevamiento Grido</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ====== BARRA SUPERIOR: título y estado de la sincronización ====== -->
+  <header class="barra-superior">
+    <h1>Relevamiento</h1>
+    <button id="chip-sync" class="chip" type="button" aria-label="Estado de la sincronización">Solo local</button>
+  </header>
+
+  <main>
+
+    <!-- ====================== PESTAÑA 1: LLEGADAS ====================== -->
+    <section id="vista-llegadas" class="vista" data-vista="llegadas" hidden>
+      <button id="btn-llegada" class="boton-gigante" type="button">
+        <span class="gigante-titulo">Llegó un cliente</span>
+        <span class="gigante-sub" id="llegada-sub">Tocá cada vez que alguien se suma a la fila</span>
+      </button>
+
+      <div class="tarjeta">
+        <div class="datos-grilla">
+          <div><span class="etiqueta">En esta sesión</span><strong id="ll-total">0</strong></div>
+          <div><span class="etiqueta">Última llegada</span><strong id="ll-ultima">-</strong></div>
+          <div><span class="etiqueta">Último intervalo</span><strong id="ll-intervalo">-</strong></div>
+          <div><span class="etiqueta">Sesiones</span><strong id="ll-sesiones">0</strong></div>
+        </div>
+      </div>
+
+      <div class="fila-botones">
+        <button id="btn-deshacer-llegada" class="boton secundario" type="button">Deshacer última</button>
+        <button id="btn-nueva-sesion" class="boton secundario" type="button">Nueva sesión</button>
+      </div>
+      <p id="aviso-sesion" class="nota" hidden>La próxima llegada abrirá una sesión nueva (no se calcula intervalo contra la anterior).</p>
+
+      <div class="tarjeta">
+        <h2>Últimas llegadas</h2>
+        <ol id="lista-llegadas" class="lista-simple"></ol>
+      </div>
+    </section>
+
+    <!-- ====================== PESTAÑA 2: ATENCIÓN ====================== -->
+    <section id="vista-atencion" class="vista" data-vista="atencion" hidden>
+      <div id="lista-clientes"></div>
+      <button id="btn-nuevo-cliente" class="boton primario ancho" type="button">+ Nuevo cliente</button>
+      <p class="nota">Una ficha por cliente. Podés tener varias abiertas a la vez (por ejemplo, uno en caja y otro en preparación).</p>
+    </section>
+
+    <!-- ====================== PESTAÑA 3: DATOS ====================== -->
+    <section id="vista-datos" class="vista" data-vista="datos" hidden>
+      <div class="tarjeta">
+        <h2>Registros guardados</h2>
+        <table id="tabla-conteos" class="tabla-simple"></table>
+        <p id="resumen-pendientes" class="nota"></p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Exportar y compartir</h2>
+        <label class="campo-form">
+          <span>Tabla</span>
+          <select id="sel-tabla"></select>
+        </label>
+        <label class="casilla">
+          <input type="checkbox" id="chk-encabezados" checked>
+          <span>Incluir encabezados al copiar</span>
+        </label>
+        <div class="grilla-botones">
+          <button id="btn-copiar" class="boton primario" type="button">Copiar tabla</button>
+          <button id="btn-csv" class="boton secundario" type="button">Descargar CSV</button>
+          <button id="btn-xlsx" class="boton secundario" type="button">Descargar Excel (todas)</button>
+          <button id="btn-compartir-xlsx" class="boton secundario" type="button">Compartir Excel</button>
+        </div>
+        <p class="nota">"Copiar tabla" deja el texto listo para pegar en celdas de Excel o Google Sheets.</p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Respaldo</h2>
+        <div class="grilla-botones">
+          <button id="btn-respaldo" class="boton secundario" type="button">Descargar respaldo</button>
+          <button id="btn-compartir-respaldo" class="boton secundario" type="button">Compartir respaldo</button>
+          <button id="btn-restaurar" class="boton secundario" type="button">Restaurar respaldo</button>
+        </div>
+        <input type="file" id="archivo-respaldo" accept=".json,application/json" hidden>
+        <p class="nota">El respaldo no incluye el enlace ni la clave de Google Sheets. Al restaurar, los registros repetidos se ignoran.</p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Últimos registros</h2>
+        <ul id="lista-registros" class="lista-registros"></ul>
+      </div>
+    </section>
+
+    <!-- ====================== PESTAÑA 4: AJUSTES ====================== -->
+    <section id="vista-ajustes" class="vista" data-vista="ajustes" hidden>
+
+      <div class="tarjeta">
+        <h2>Observador (opcional)</h2>
+        <label class="campo-form">
+          <span>Tu nombre</span>
+          <input type="text" id="aj-observador" autocomplete="off" placeholder="Dejalo vacío si no querés registrarlo">
+        </label>
+        <p class="nota">Si lo completás, se agrega como columna "observador" en los registros nuevos.</p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Pantalla y sesiones</h2>
+        <label class="casilla">
+          <input type="checkbox" id="aj-pantalla">
+          <span>Mantener la pantalla encendida</span>
+        </label>
+        <label class="campo-form">
+          <span>Cortar sesión de llegadas tras (minutos sin llegadas, 0 = no cortar)</span>
+          <input type="number" id="aj-corte" min="0" max="240" inputmode="numeric">
+        </label>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Google Sheets</h2>
+        <label class="casilla">
+          <input type="checkbox" id="aj-sync">
+          <span>Enviar los registros a Google Sheets</span>
+        </label>
+        <label class="campo-form">
+          <span>Enlace del script (termina en /exec)</span>
+          <input type="url" id="aj-url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec">
+        </label>
+        <label class="campo-form">
+          <span>Clave</span>
+          <input type="text" id="aj-clave" autocomplete="off" autocapitalize="off" spellcheck="false">
+        </label>
+        <div class="grilla-botones">
+          <button id="btn-probar" class="boton secundario" type="button">Probar conexión</button>
+          <button id="btn-sync-ahora" class="boton primario" type="button">Sincronizar ahora</button>
+          <button id="btn-compartir-config" class="boton secundario" type="button">Compartir configuración</button>
+          <button id="btn-pegar-config" class="boton secundario" type="button">Pegar configuración</button>
+        </div>
+        <p id="estado-sync" class="nota"></p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Borrar datos</h2>
+        <button id="btn-borrar" class="boton peligro ancho" type="button">Borrar datos de este celular</button>
+        <p class="nota">Lo ya enviado a Google Sheets no se toca: eso se borra desde la planilla.</p>
+      </div>
+
+      <div class="tarjeta">
+        <h2>Instalar en la pantalla de inicio</h2>
+        <button id="btn-instalar" class="boton secundario ancho" type="button" hidden>Instalar la app</button>
+        <p class="nota"><strong>Android (Chrome):</strong> menú de tres puntos, "Instalar aplicación".<br>
+          <strong>iPhone (Safari):</strong> botón Compartir, "Agregar a pantalla de inicio". Conviene instalarla antes de cargar datos, porque en iPhone la app instalada guarda sus datos aparte de Safari.</p>
+        <p class="nota" id="version-app"></p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ====== NAVEGACIÓN INFERIOR (alcanzable con el pulgar) ====== -->
+  <nav class="navegacion" aria-label="Secciones">
+    <button type="button" data-ir="llegadas" aria-label="Llegadas">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><path d="M19 7v6M16 10h6"/></svg>
+      <span>Llegadas</span>
+    </button>
+    <button type="button" data-ir="atencion" aria-label="Atención">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4.5l3 2M9.5 2.5h5M12 2.5v3.5"/></svg>
+      <span>Atención</span>
+    </button>
+    <button type="button" data-ir="datos" aria-label="Datos">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 10h18M3 15h18M9.5 4v16"/></svg>
+      <span>Datos</span>
+    </button>
+    <button type="button" data-ir="ajustes" aria-label="Ajustes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.5"/><circle cx="9" cy="17" r="2.5"/></svg>
+      <span>Ajustes</span>
+    </button>
+  </nav>
+
+  <!-- ====== VENTANA MODAL (confirmaciones y diálogos) ====== -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal-caja" role="dialog" aria-modal="true" aria-labelledby="modal-titulo">
+      <h2 id="modal-titulo"></h2>
+      <div id="modal-cuerpo"></div>
+      <div id="modal-botones" class="modal-botones"></div>
+    </div>
+  </div>
+
+  <!-- ====== AVISOS BREVES ====== -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- Librerías locales (se cargan solo cuando se necesitan, ver app.js) -->
+  <script src="app.js"></script>
+</body>
+</html>
