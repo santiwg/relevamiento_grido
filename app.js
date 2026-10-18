@@ -1,18 +1,20 @@
 'use strict';
 
 /* ==========================================================================
-   RELEVAMIENTO GRIDO - app.js
+   RELEVAMIENTO GRIDO - app.js (v2)
    --------------------------------------------------------------------------
    App para tomar los datos de entrada del modelo de simulación (fila de caja
-   y fila de preparación de una heladería).
+   y fila de preparación de una heladería). Un seguimiento unificado por
+   cliente: cada llegada crea una ficha que avanza por 4 estados
+   (fila de caja > en caja > fila de preparación > en preparación).
 
    Cómo está organizado este archivo (buscá los números):
      1. Constantes y definición de las tablas
      2. Estado y guardado en el celular (localStorage)
      3. Utilidades (formatos, avisos, ventanas modales)
-     4. Armado de las tablas (a partir de llegadas y clientes)
-     5. Pestaña LLEGADAS
-     6. Pestaña ATENCIÓN (fichas con cronómetros)
+     4. Armado de las tablas (a partir de llegadas, clientes y preparadores)
+     5. Pestaña ATENCIÓN: llegadas, preparadores y aviso de foto de las colas
+     6. Pestaña ATENCIÓN: fichas de clientes
      7. Pestaña DATOS (exportar, compartir, respaldo)
      8. Sincronización con Google Sheets
      9. Enlace de configuración y código QR
@@ -21,7 +23,10 @@
 
    Idea central: cada registro se guarda SIEMPRE primero en el celular. Si la
    sincronización está activada, se envía a Google Sheets cuando hay señal;
-   si no hay, queda "pendiente" y se reintenta solo.
+   si no hay, queda "pendiente" y se reintenta solo. El script de Google
+   actualiza la fila si el id ya existe (así una llegada puede pasar a
+   "no seguida") y arma él mismo la hoja Intervalos con las llegadas de todos
+   los celulares.
    ========================================================================== */
 
 
@@ -29,33 +34,46 @@
    1. CONSTANTES Y DEFINICIÓN DE LAS TABLAS
    ========================================================================== */
 
-const VERSION = '1.0.0';
-const CLAVE_STORAGE = 'relevamiento-grido-v1';   // nombre bajo el que se guarda todo
+const VERSION = '2.0.0';
+const CLAVE_STORAGE = 'relevamiento-grido-v2';   // nombre bajo el que se guarda todo (v1 = versión anterior)
 const ESPERA_SYNC_MS = 10000;                    // espera antes de enviar (da tiempo a "Deshacer")
 const LOTE_SYNC = 25;                            // cantidad de registros por envío
 const ANTIREBOTE_LLEGADA_MS = 500;               // ignora toques repetidos muy rápidos
-const GRUPO_GRANDE_MIN = 3;                      // "grupo grande" = 3 personas o más (más de 2)
+const GRUPO_GRANDE_MIN = 3;                      // "grupo grande" = 3 personas o más
 const MAX_PERSONAS = 40;
+const MAX_PREPARADORES = 20;
+const ESPERA_PREPARADORES_MS = 2000;             // se registra el cambio cuando pasan 2 s sin tocar + o -
+const CORTE_SESION_MIN = 15;                     // igual que el script: más de esto sin llegadas = otra sesión
+const AVISO_FOTO_VISIBLE_MS = 30000;             // el aviso de foto se oculta solo a los 30 s
 
 const NOMBRE_TIPO = { 0: 'Ninguna', 1: 'Individual', 2: 'Por peso' };
+const ETIQUETA_ESTADO = { fila_caja: 'Fila de caja', caja: 'En caja', fila_prep: 'Fila de preparación', prep: 'En preparación' };
+const NOMBRE_CIERRE = { completo: 'completo', sin_preparacion: 'sin preparación', perdi_seguimiento: 'perdí el seguimiento' };
 
 /*
   Definición de las tablas. El ORDEN de "columnas" es el orden en que salen
-  al copiar, al exportar y en la planilla de Google Sheets.
-  (Además, en Sheets cada fila lleva una columna "id" al final, que sirve
-  para no duplicar filas si se reenvía un registro.)
+  al copiar, al exportar y en la planilla de Google Sheets (Code.gs tiene las
+  mismas columnas, más "id" y "recibido_el" que agrega el script).
+  La tabla "intervalos" local solo ve las llegadas de ESTE celular; la
+  completa (todos los celulares, con duplicados) la arma el script en Sheets.
 */
 const TABLAS = {
-  llegadas:     { hoja: 'Llegadas',     titulo: 'Llegadas',                      columnas: ['hora_llegada', 'intervalo_seg', 'cargado_el', 'observador'] },
-  personas:     { hoja: 'Personas',     titulo: 'Personas por cliente',          columnas: ['personas', 'cargado_el', 'observador'] },
-  tipo:         { hoja: 'Tipo',         titulo: 'Tipo de preparación (0/1/2)',   columnas: ['tipo', 'cargado_el', 'observador'] },
-  caja:         { hoja: 'Caja',         titulo: 'Atención del cajero',           columnas: ['duracion_seg', 'inicio', 'fin', 'cargado_el', 'observador'] },
-  individuales: { hoja: 'Individuales', titulo: 'Preparación de individuales',   columnas: ['duracion_seg', 'personas', 'grupo_grande', 'inicio', 'fin', 'cargado_el', 'observador'] },
-  peso:         { hoja: 'Peso',         titulo: 'Preparación de productos por peso', columnas: ['duracion_seg', 'inicio', 'fin', 'cargado_el', 'observador'] }
+  llegadas:     { hoja: 'Llegadas',     titulo: 'Llegadas',
+                  columnas: ['hora_llegada', 'seguida', 'id_cliente', 'observador', 'dispositivo', 'cargado_el'] },
+  clientes:     { hoja: 'Clientes',     titulo: 'Clientes (uno por ficha)',
+                  columnas: ['id_cliente', 'llegada', 'inicio_caja', 'fin_caja', 'inicio_prep', 'fin_prep', 'salida_sistema',
+                             'seg_sistema', 'seg_cola_caja', 'seg_caja', 'seg_cola_prep', 'seg_prep',
+                             'calidad', 'cierre', 'personas', 'tipo', 'grupo_grande', 'comentario',
+                             'observador', 'dispositivo', 'cargado_el'] },
+  intervalos:   { hoja: 'Intervalos',   titulo: 'Intervalos (solo este celular)',
+                  columnas: ['hora_llegada', 'intervalo_seg', 'seguida', 'observador', 'id_llegada'] },
+  preparadores: { hoja: 'Preparadores', titulo: 'Preparadores',
+                  columnas: ['hora_cambio', 'cantidad', 'observador', 'dispositivo', 'cargado_el'] }
 };
 
 // Columnas que contienen fecha y hora (se guardan como milisegundos y se formatean al exportar)
-const COLUMNAS_FECHA = ['hora_llegada', 'inicio', 'fin', 'cargado_el'];
+const COLUMNAS_FECHA = ['hora_llegada', 'llegada', 'inicio_caja', 'fin_caja', 'inicio_prep', 'fin_prep',
+                        'salida_sistema', 'hora_cambio', 'cargado_el'];
 
 
 /* ==========================================================================
@@ -64,18 +82,22 @@ const COLUMNAS_FECHA = ['hora_llegada', 'inicio', 'fin', 'cargado_el'];
 
 function estadoInicial() {
   return {
-    version: 1,
-    llegadas: [],            // { id, t, inicioSesion, obs, sync }
-    clientesActivos: [],     // fichas abiertas: { id, num, personas, tipo, cajaIni, cajaFin, prepIni, prepFin }
-    clientes: [],            // clientes terminados: ficha + { terminadoEl, obs, sync }
-    contadorClientes: 0,     // numeración de fichas (solo para mostrar)
-    proximaEsNuevaSesion: false,
-    vista: 'llegadas',
-    ultimaSyncOk: null,      // instante (ms) del último envío correcto
+    version: 2,
+    dispositivoId: nuevoId(),   // identifica este celular (sirve para detectar llegadas duplicadas entre celulares)
+    llegadas: [],               // { id, t, obs, disp, seguida, idCliente, sync }
+    clientesActivos: [],        // fichas abiertas: { id, num, idLlegada, t0, estado, cajaIni, cajaFin, prepIni, prepFin,
+                                //                    personas, tipo, comentario, historial[] }
+    clientes: [],               // fichas cerradas: { id, num, idLlegada, t0, cajaIni, cajaFin, prepIni, prepFin, salida,
+                                //                    personas, tipo, comentario, cierre, terminadoEl, obs, disp, sync }
+    preparadores: [],           // cambios de cantidad: { id, t, cantidad, obs, disp, sync }
+    preparadoresActual: 0,
+    contadorClientes: 0,        // numeración de fichas (solo para mostrar)
+    vista: 'atencion',
+    ultimaSyncOk: null,         // instante (ms) del último envío correcto
     ajustes: {
       observador: '',
       pantallaEncendida: true,
-      cortarSesionMin: 15,
+      fotoColasMin: 10,         // aviso de foto de las colas cada N minutos (0 = apagado)
       sincronizar: false,
       urlSheets: '',
       claveSheets: ''
@@ -219,66 +241,71 @@ async function preguntar(titulo, html, textoOk, claseOk = 'primario') {
 
 /* ==========================================================================
    4. ARMADO DE LAS TABLAS
-   Los datos se guardan "crudos" (llegadas y clientes) y las 6 tablas se
-   arman a partir de ellos. Así se puede corregir un error antes de exportar
-   y las tablas nunca quedan desajustadas entre sí.
+   Los datos se guardan "crudos" (llegadas, clientes, preparadores) y las
+   tablas se arman a partir de ellos. Así las tablas nunca quedan
+   desajustadas entre sí. Esta misma lógica arma las filas que se envían a
+   Google Sheets (el script vuelve a calcular seg_*, calidad y grupo_grande).
    ========================================================================== */
 
-/** Intervalo (en segundos) entre cada llegada y la anterior. Vacío al inicio de una sesión. */
+/** Diferencia en segundos entre dos instantes (vacía si falta alguno o es negativa) */
+function difSeg(desde, hasta) {
+  if (!desde || !hasta || hasta < desde) return null;
+  return segundos(hasta - desde);
+}
+
+/** Intervalo (en segundos) entre cada llegada y la anterior DE ESTE CELULAR. Vacío tras una pausa larga. */
 function calcularIntervalos() {
   const orden = [...estado.llegadas].sort((a, b) => a.t - b.t);
   const mapa = new Map();
+  const corte = CORTE_SESION_MIN * 60000;
   let previa = null;
   for (const l of orden) {
-    mapa.set(l.id, (previa && !l.inicioSesion) ? segundos(l.t - previa.t) : null);
+    mapa.set(l.id, (previa && l.t - previa.t <= corte) ? segundos(l.t - previa.t) : null);
     previa = l;
   }
   return mapa;
 }
 
-/** Filas que genera una llegada: { tabla, valores } */
-function filasDeLlegada(l, intervalos) {
-  return [{ tabla: 'llegadas', valores: {
-    hora_llegada: l.t, intervalo_seg: intervalos.get(l.id), cargado_el: l.t, observador: l.obs || ''
-  } }];
+function filaLlegada(l) {
+  return {
+    hora_llegada: l.t, seguida: l.seguida, id_cliente: l.idCliente,
+    observador: l.obs || '', dispositivo: l.disp || estado.dispositivoId, cargado_el: l.t
+  };
 }
 
-/** Filas que genera un cliente terminado (según su tipo y los tiempos medidos) */
-function filasDeCliente(c) {
-  const base = { cargado_el: c.terminadoEl, observador: c.obs || '' };
-  const filas = [
-    { tabla: 'personas', valores: Object.assign({ personas: c.personas }, base) },
-    { tabla: 'tipo',     valores: Object.assign({ tipo: c.tipo }, base) }
-  ];
-  if (c.cajaIni && c.cajaFin) {
-    filas.push({ tabla: 'caja', valores: Object.assign({
-      duracion_seg: segundos(c.cajaFin - c.cajaIni), inicio: c.cajaIni, fin: c.cajaFin
-    }, base) });
-  }
-  if (c.tipo !== 0 && c.prepIni && c.prepFin) {
-    const tiempos = { duracion_seg: segundos(c.prepFin - c.prepIni), inicio: c.prepIni, fin: c.prepFin };
-    if (c.tipo === 1) {
-      filas.push({ tabla: 'individuales', valores: Object.assign(tiempos, {
-        personas: c.personas, grupo_grande: c.personas >= GRUPO_GRANDE_MIN
-      }, base) });
-    } else {
-      filas.push({ tabla: 'peso', valores: Object.assign(tiempos, base) });
-    }
-  }
-  return filas;
+/** Fila de un cliente cerrado. Sin preparación (tipo 0) no hay cola ni tiempo de preparación. */
+function filaCliente(c) {
+  const sinPrep = c.tipo === 0;
+  const completo = !!(c.t0 && c.cajaIni && c.cajaFin && c.salida && (sinPrep || (c.prepIni && c.prepFin)));
+  return {
+    id_cliente: c.id, llegada: c.t0, inicio_caja: c.cajaIni, fin_caja: c.cajaFin,
+    inicio_prep: sinPrep ? null : c.prepIni, fin_prep: sinPrep ? null : c.prepFin, salida_sistema: c.salida,
+    seg_sistema: difSeg(c.t0, c.salida), seg_cola_caja: difSeg(c.t0, c.cajaIni), seg_caja: difSeg(c.cajaIni, c.cajaFin),
+    seg_cola_prep: sinPrep ? null : difSeg(c.cajaFin, c.prepIni),
+    seg_prep: sinPrep ? null : difSeg(c.prepIni, c.prepFin),
+    calidad: completo ? 'completo' : 'incompleto', cierre: c.cierre,
+    personas: c.personas, tipo: c.tipo, grupo_grande: c.personas >= GRUPO_GRANDE_MIN,
+    comentario: c.comentario || '', observador: c.obs || '', dispositivo: c.disp || estado.dispositivoId,
+    cargado_el: c.terminadoEl
+  };
 }
 
-/** Devuelve { llegadas: [valores...], personas: [...], ... } ordenado por hora de carga */
+function filaPreparadores(p) {
+  return { hora_cambio: p.t, cantidad: p.cantidad, observador: p.obs || '', dispositivo: p.disp || estado.dispositivoId, cargado_el: p.t };
+}
+
+/** Devuelve { llegadas: [valores...], clientes: [...], intervalos: [...], preparadores: [...] } ordenado por hora */
 function construirTablas() {
-  const salida = {};
-  Object.keys(TABLAS).forEach(k => { salida[k] = []; });
   const intervalos = calcularIntervalos();
-  const items = [
-    ...estado.llegadas.map(l => ({ t: l.t, filas: filasDeLlegada(l, intervalos) })),
-    ...estado.clientes.map(c => ({ t: c.terminadoEl, filas: filasDeCliente(c) }))
-  ].sort((a, b) => a.t - b.t);
-  for (const it of items) for (const f of it.filas) salida[f.tabla].push(f.valores);
-  return salida;
+  const llegadas = [...estado.llegadas].sort((a, b) => a.t - b.t);
+  return {
+    llegadas: llegadas.map(filaLlegada),
+    clientes: [...estado.clientes].sort((a, b) => a.terminadoEl - b.terminadoEl).map(filaCliente),
+    intervalos: llegadas.map(l => ({
+      hora_llegada: l.t, intervalo_seg: intervalos.get(l.id), seguida: l.seguida, observador: l.obs || '', id_llegada: l.id
+    })),
+    preparadores: [...estado.preparadores].sort((a, b) => a.t - b.t).map(filaPreparadores)
+  };
 }
 
 /** Valor de una celda como texto (coma decimal, fechas dd/mm/aaaa hh:mm:ss, TRUE/FALSE) */
@@ -303,7 +330,7 @@ function tablaATexto(clave, separador, conEncabezados) {
 
 
 /* ==========================================================================
-   5. PESTAÑA LLEGADAS
+   5. PESTAÑA ATENCIÓN: llegadas, preparadores y aviso de foto de las colas
    ========================================================================== */
 
 let ultimoToqueLlegada = 0;
@@ -311,26 +338,30 @@ let ultimoToqueLlegada = 0;
 function ultimaLlegada() {
   return estado.llegadas.reduce((m, l) => (!m || l.t > m.t ? l : m), null);
 }
+function copiar(obj) { return JSON.parse(JSON.stringify(obj)); }
+/** m:ss (para el tiempo que lleva una ficha en su estado actual) */
+function fmtMinSeg(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${pad(s % 60)}`;
+}
 
+/** "Llega alguien": guarda la llegada y abre automáticamente la ficha del cliente (en la fila de caja) */
 function registrarLlegada() {
   const ahora = Date.now();
   if (ahora - ultimoToqueLlegada < ANTIREBOTE_LLEGADA_MS) return;   // toque repetido accidental
   ultimoToqueLlegada = ahora;
 
-  const previa = ultimaLlegada();
-  const corte = Number(estado.ajustes.cortarSesionMin) || 0;
-  let inicioSesion = false;
-  if (!previa) {
-    inicioSesion = true;
-  } else if (estado.proximaEsNuevaSesion) {
-    inicioSesion = true;
-  } else if (corte > 0 && ahora - previa.t > corte * 60000) {
-    inicioSesion = true;
-    aviso(`Pasaron más de ${corte} min sin llegadas: se abrió una sesión nueva.`);
-  }
-  estado.proximaEsNuevaSesion = false;
-
-  estado.llegadas.push({ id: nuevoId(), t: ahora, inicioSesion, obs: estado.ajustes.observador || '', sync: false });
+  const idLlegada = nuevoId(), idCliente = nuevoId();
+  estado.contadorClientes += 1;
+  estado.llegadas.push({
+    id: idLlegada, t: ahora, obs: estado.ajustes.observador || '', disp: estado.dispositivoId,
+    seguida: true, idCliente, sync: false
+  });
+  estado.clientesActivos.push({
+    id: idCliente, num: estado.contadorClientes, idLlegada, t0: ahora, estado: 'fila_caja',
+    cajaIni: null, cajaFin: null, prepIni: null, prepFin: null,
+    personas: 1, tipo: null, comentario: '', historial: []
+  });
   cambio();
   vibrar();
   const b = $('#btn-llegada');
@@ -338,239 +369,285 @@ function registrarLlegada() {
   syncSoon();
 }
 
-function deshacerLlegada() {
-  const ultima = ultimaLlegada();
-  if (!ultima) { aviso('No hay llegadas para deshacer.'); return; }
-  if (ultima.sync) { aviso('Esa llegada ya se envió a Google Sheets: borrala también en la planilla.'); }
-  estado.llegadas = estado.llegadas.filter(l => l.id !== ultima.id);
+/** Deshace la última llegada (y su ficha). Si la ficha ya avanzó o se cerró, pide confirmación. */
+async function deshacerLlegada() {
+  const u = ultimaLlegada();
+  if (!u) { aviso('No hay llegadas para deshacer.'); return; }
+  const ficha = estado.clientesActivos.find(f => f.id === u.idCliente);
+  const cerrado = estado.clientes.find(c => c.id === u.idCliente);
+  if ((ficha && ficha.estado !== 'fila_caja') || cerrado) {
+    const ok = await preguntar('¿Deshacer esa llegada?',
+      '<p>Ese cliente ya tiene tiempos medidos o está cerrado: también se borra su ficha.</p>', 'Deshacer llegada', 'peligro');
+    if (!ok) return;
+  }
+  estado.llegadas = estado.llegadas.filter(l => l.id !== u.id);
+  estado.clientesActivos = estado.clientesActivos.filter(f => f.id !== u.idCliente);
+  estado.clientes = estado.clientes.filter(c => c.id !== u.idCliente);
   cambio();
-  aviso('Se deshizo la última llegada.');
+  aviso(u.sync || (cerrado && cerrado.sync)
+    ? 'Se deshizo acá, pero ya se había enviado a Google Sheets: borrala también en la planilla.'
+    : 'Se deshizo la última llegada.');
 }
 
-async function nuevaSesion() {
-  estado.proximaEsNuevaSesion = !estado.proximaEsNuevaSesion;
-  cambio();
-  aviso(estado.proximaEsNuevaSesion ? 'Listo: la próxima llegada abre una sesión nueva.' : 'Se canceló la nueva sesión.');
-}
-
+/** Resumen y registro de últimas llegadas (parte de abajo de la pestaña) */
 function renderLlegadas() {
   const orden = [...estado.llegadas].sort((a, b) => a.t - b.t);
   const intervalos = calcularIntervalos();
-  const sesiones = orden.filter(l => l.inicioSesion).length;
-  let idxInicio = 0;
-  orden.forEach((l, i) => { if (l.inicioSesion) idxInicio = i; });
-  const enSesion = orden.length ? orden.length - idxInicio : 0;
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
   const ultima = orden[orden.length - 1];
 
-  $('#ll-total').textContent = enSesion;
-  $('#ll-sesiones').textContent = sesiones;
+  $('#ll-total').textContent = orden.filter(l => l.t >= hoy.getTime()).length;
   $('#ll-ultima').textContent = ultima ? fmtHora(ultima.t) : '-';
   const inter = ultima ? intervalos.get(ultima.id) : null;
-  $('#ll-intervalo').textContent = inter === null || inter === undefined ? '-' : fmtNumero(inter) + ' s';
-  $('#aviso-sesion').hidden = !estado.proximaEsNuevaSesion;
-  $('#btn-nueva-sesion').textContent = estado.proximaEsNuevaSesion ? 'Cancelar nueva sesión' : 'Nueva sesión';
+  $('#ll-intervalo').textContent = (inter === null || inter === undefined) ? '-' : fmtNumero(inter) + ' s';
+  $('#prep-cantidad').textContent = estado.preparadoresActual;
 
   const ult = orden.slice(-8).reverse();
   $('#lista-llegadas').innerHTML = ult.length
     ? ult.map(l => {
         const iv = intervalos.get(l.id);
-        const detalle = l.inicioSesion ? 'inicio de sesión' : (iv === null ? '-' : fmtNumero(iv) + ' s');
+        const detalle = (iv === null || iv === undefined ? '-' : fmtNumero(iv) + ' s') + (l.seguida ? '' : ' · no seguida');
         return `<li><span>${fmtHora(l.t)}</span><span>${detalle}</span></li>`;
       }).join('')
     : '<li class="vacio">Todavía no hay llegadas.</li>';
 }
 
+/* ---------- Contador de preparadores ---------- */
+let temporizadorPrep = null;
+let ultimoToquePrep = 0;
 
-/* ==========================================================================
-   6. PESTAÑA ATENCIÓN
-   Una ficha por cliente, con personas, tipo de preparación y dos cronómetros
-   (caja y preparación). Los cronómetros guardan el INSTANTE de inicio y de
-   fin (no un contador), así no se desajustan si se bloquea el celular.
-   ========================================================================== */
-
-function crearFicha() {
-  estado.contadorClientes += 1;
-  estado.clientesActivos.push({
-    id: nuevoId(), num: estado.contadorClientes,
-    personas: 1, tipo: null,                    // tipo: null (sin elegir), 0 ninguna, 1 individual, 2 por peso
-    cajaIni: null, cajaFin: null, prepIni: null, prepFin: null
-  });
+/** Cambia la cantidad. El registro se guarda cuando pasan unos segundos sin tocar (así 0 > 3 es un solo cambio). */
+function cambiarPreparadores(delta) {
+  const n = Math.max(0, Math.min(MAX_PREPARADORES, estado.preparadoresActual + delta));
+  if (n === estado.preparadoresActual) return;
+  estado.preparadoresActual = n;
+  ultimoToquePrep = Date.now();
+  guardar();
+  $('#prep-cantidad').textContent = n;
+  vibrar(15);
+  clearTimeout(temporizadorPrep);
+  temporizadorPrep = setTimeout(registrarPreparadores, ESPERA_PREPARADORES_MS);
 }
 
-/** HTML de una fila de cronómetro. cual: 'caja' o 'prep' */
-function htmlReloj(c, cual, etiqueta) {
-  const ini = c[cual + 'Ini'], fin = c[cual + 'Fin'];
-  const clase = !ini ? '' : (!fin ? 'corriendo' : 'listo');
+function registrarPreparadores() {
+  temporizadorPrep = null;
+  const ult = [...estado.preparadores].sort((a, b) => b.t - a.t)[0];
+  if (ult ? ult.cantidad === estado.preparadoresActual : estado.preparadoresActual === 0) return;   // no cambió nada
+  estado.preparadores.push({
+    id: nuevoId(), t: ultimoToquePrep || Date.now(), cantidad: estado.preparadoresActual,
+    obs: estado.ajustes.observador || '', disp: estado.dispositivoId, sync: false
+  });
+  cambio();
+  syncSoon();
+}
 
-  // La preparación no aplica si el cliente se lleva solo productos ya elaborados
-  if (cual === 'prep' && c.tipo === 0) {
-    return `<div class="campo"><span class="etiqueta">${etiqueta}</span><span class="no-aplica">No aplica (se retira después de la caja)</span></div>`;
-  }
-  const texto = !ini ? '0:00.0' : fmtReloj((fin || Date.now()) - ini);
-  const boton = !ini
-    ? `<button type="button" class="boton primario" data-accion="reloj" data-reloj="${cual}">Iniciar</button>`
-    : (!fin
-        ? `<button type="button" class="boton corriendo" data-accion="reloj" data-reloj="${cual}">Detener</button>`
-        : `<button type="button" class="boton" disabled>Listo</button>`);
-  const reinicio = ini ? `<button type="button" class="boton reinicio" data-accion="reiniciar" data-reloj="${cual}" aria-label="Reiniciar cronómetro">&#8634;</button>` : '';
-  return `
-    <div class="campo">
-      <span class="etiqueta">${etiqueta}</span>
-      <div class="reloj-fila">
-        <span class="reloj ${clase}" data-ini="${ini || ''}" data-fin="${fin || ''}">${texto}</span>
-        <div class="botones-reloj">${boton}${reinicio}</div>
-      </div>
-    </div>`;
+/* ---------- Aviso discreto de foto de las colas ---------- */
+let intervaloFoto = null;
+let temporizadorOcultarFoto = null;
+
+/** Una franja chica que aparece cada N minutos y se va sola. No vibra, no usa ventana y no frena nada. */
+function mostrarAvisoFoto() {
+  if (document.visibilityState !== 'visible' || estado.vista !== 'atencion' || !$('#modal').hidden) return;
+  $('#aviso-foto').hidden = false;
+  clearTimeout(temporizadorOcultarFoto);
+  temporizadorOcultarFoto = setTimeout(() => { $('#aviso-foto').hidden = true; }, AVISO_FOTO_VISIBLE_MS);
+}
+
+function programarFoto() {
+  clearInterval(intervaloFoto);
+  intervaloFoto = null;
+  $('#aviso-foto').hidden = true;
+  const min = Number(estado.ajustes.fotoColasMin) || 0;
+  if (min > 0) intervaloFoto = setInterval(mostrarAvisoFoto, min * 60000);
+}
+
+
+/* ==========================================================================
+   6. PESTAÑA ATENCIÓN: FICHAS DE CLIENTES
+   Una ficha chica por cliente, sin límite. Avanza con un toque por 4 estados:
+     fila de caja > en caja > fila de preparación > en preparación > (sale)
+   Cada paso guarda el INSTANTE del toque. Si el cliente no lleva preparación
+   (tipo "Ninguna") sale al terminar la caja y esa hora es su salida.
+   ========================================================================== */
+
+const TEXTO_AVANCE = { fila_caja: 'Pasa a caja', caja: 'Sale de caja', fila_prep: 'Empieza preparación', prep: 'Termina y se va' };
+
+/** Instante en que la ficha entró a su estado actual (para el reloj chico) */
+function desdeEstado(c) {
+  return c.estado === 'fila_caja' ? c.t0 : c.estado === 'caja' ? c.cajaIni : c.estado === 'fila_prep' ? c.cajaFin : c.prepIni;
 }
 
 function htmlCliente(c) {
-  const botonesTipo = [0, 1, 2].map(t =>
-    `<button type="button" data-accion="tipo" data-tipo="${t}" class="${c.tipo === t ? 'activo' : ''}">${NOMBRE_TIPO[t]}</button>`
-  ).join('');
+  const detalle = c.estado === 'fila_caja' ? '' : `
+    <div class="ficha-det">
+      <div class="stepper mini">
+        <button type="button" data-accion="menos" aria-label="Una persona menos">&minus;</button>
+        <output>${c.personas}</output>
+        <button type="button" data-accion="mas" aria-label="Una persona más">+</button>
+      </div>
+      <div class="segmentado mini" data-segmentado>
+        ${[0, 1, 2].map(t => `<button type="button" data-accion="tipo" data-tipo="${t}" class="${c.tipo === t ? 'activo' : ''}">${NOMBRE_TIPO[t]}</button>`).join('')}
+      </div>
+    </div>`;
+  const avance = (c.estado === 'caja' && c.tipo === 0) ? 'Sale de caja y se va' : TEXTO_AVANCE[c.estado];
+  const secundario = c.estado === 'fila_caja' ? ['nosigo', 'No voy a seguirla'] : ['perdi', 'Perdí el seguimiento'];
+  const desde = desdeEstado(c);
   return `
-    <article class="cliente" data-id="${c.id}">
-      <div class="cliente-cab">
-        <h3>Cliente ${c.num}</h3>
-        <button type="button" class="btn-texto" data-accion="descartar">Descartar</button>
+    <article class="cliente e-${c.estado}" data-id="${c.id}">
+      <div class="ficha-cab">
+        <strong class="ficha-num">#${c.num}</strong>
+        <span class="ficha-hora">${fmtHora(c.t0)}</span>
+        <span class="ficha-estado">${ETIQUETA_ESTADO[c.estado]}</span>
+        <span class="reloj" data-desde="${desde}">${fmtMinSeg(Date.now() - desde)}</span>
+        ${c.historial.length ? '<button type="button" class="btn-atras" data-accion="atras" aria-label="Deshacer el último paso">&#8630;</button>' : ''}
       </div>
-      <div class="campo fila-campo">
-        <span class="etiqueta">Personas en el grupo</span>
-        <div class="stepper">
-          <button type="button" data-accion="menos" aria-label="Una persona menos">&minus;</button>
-          <output>${c.personas}</output>
-          <button type="button" data-accion="mas" aria-label="Una persona más">+</button>
-        </div>
+      <input type="text" class="ficha-coment" maxlength="40" autocomplete="off" placeholder="Seña (ej. remera roja)" value="${escapar(c.comentario)}">
+      ${detalle}
+      <div class="ficha-acciones">
+        <button type="button" class="boton primario ficha-avanzar" data-accion="avanzar">${avance}</button>
+        <button type="button" class="btn-texto" data-accion="${secundario[0]}">${secundario[1]}</button>
       </div>
-      <div class="campo">
-        <span class="etiqueta">Tipo de preparación (ninguna = solo productos listos)</span>
-        <div class="segmentado" data-segmentado>${botonesTipo}</div>
-      </div>
-      ${htmlReloj(c, 'caja', 'Atención en caja')}
-      ${htmlReloj(c, 'prep', 'Preparación')}
-      <button type="button" class="boton primario ancho grande terminar" data-accion="terminar">Terminar y guardar</button>
     </article>`;
 }
 
+/** Dibuja las fichas (la más nueva arriba, justo debajo del botón de llegadas) y el resumen */
 function renderAtencion() {
-  $('#lista-clientes').innerHTML = estado.clientesActivos.map(htmlCliente).join('');
+  const fichas = [...estado.clientesActivos].sort((a, b) => b.num - a.num);
+  $('#lista-clientes').innerHTML = fichas.length
+    ? fichas.map(htmlCliente).join('')
+    : '<p class="nota vacio">No hay clientes en seguimiento. Tocá "Llega alguien" cuando entre uno.</p>';
+  renderLlegadas();
 }
 
-/** Actualiza en pantalla los cronómetros que están corriendo (10 veces por segundo) */
+/** Actualiza el reloj chico de cada ficha (una vez por segundo) */
 setInterval(() => {
-  $$('.reloj[data-ini]').forEach(el => {
-    const ini = Number(el.dataset.ini) || 0;
-    const fin = Number(el.dataset.fin) || 0;
-    if (ini && !fin) el.textContent = fmtReloj(Date.now() - ini);
+  $$('.reloj[data-desde]').forEach(el => {
+    const d = Number(el.dataset.desde) || 0;
+    if (d) el.textContent = fmtMinSeg(Date.now() - d);
   });
-}, 100);
+}, 1000);
+
+/** El comentario se guarda mientras se escribe, sin redibujar (así no se pierde el foco del teclado) */
+function alEscribirFicha(ev) {
+  const campo = ev.target.closest('.ficha-coment');
+  if (!campo) return;
+  const c = estado.clientesActivos.find(x => x.id === campo.closest('.cliente').dataset.id);
+  if (!c) return;
+  c.comentario = campo.value;
+  guardar();
+}
 
 /** Toques dentro de las fichas (un solo "escuchador" para todas) */
-async function alTocarFicha(ev) {
+function alTocarFicha(ev) {
   const boton = ev.target.closest('[data-accion]');
-  if (!boton) return;
-  const ficha = boton.closest('.cliente');
+  const ficha = boton && boton.closest('.cliente');
+  if (!ficha) return;
   const c = estado.clientesActivos.find(x => x.id === ficha.dataset.id);
   if (!c) return;
 
   switch (boton.dataset.accion) {
     case 'menos': c.personas = Math.max(1, c.personas - 1); break;
     case 'mas':   c.personas = Math.min(MAX_PERSONAS, c.personas + 1); break;
-
     case 'tipo': {
       const t = Number(boton.dataset.tipo);
-      // Si ya se había cronometrado preparación y ahora se elige "ninguna", se descarta ese tiempo
-      if (t === 0 && c.prepIni) {
-        const ok = await preguntar('¿Cambiar a "Ninguna"?', '<p>Se va a descartar el tiempo de preparación ya medido para este cliente.</p>', 'Descartar tiempo', 'peligro');
-        if (!ok) return;
-        c.prepIni = null; c.prepFin = null;
+      if (t === 0 && (c.estado === 'fila_prep' || c.estado === 'prep')) {
+        aviso('Ya salió de caja hacia la preparación: no puede ser "Ninguna".');
+        return;
       }
       c.tipo = t;
       break;
     }
-
-    case 'reloj': {
-      const ini = boton.dataset.reloj + 'Ini', fin = boton.dataset.reloj + 'Fin';
-      if (!c[ini]) c[ini] = Date.now();
-      else if (!c[fin]) c[fin] = Date.now();
-      vibrar(15);
-      break;
-    }
-
-    case 'reiniciar': {
-      const ok = await preguntar('¿Reiniciar el cronómetro?', '<p>Se borra el tiempo medido y se puede volver a empezar.</p>', 'Reiniciar', 'peligro');
-      if (!ok) return;
-      c[boton.dataset.reloj + 'Ini'] = null;
-      c[boton.dataset.reloj + 'Fin'] = null;
-      break;
-    }
-
-    case 'descartar': {
-      const ok = await preguntar(`¿Descartar el cliente ${c.num}?`, '<p>No se guarda ningún dato de esta ficha.</p>', 'Descartar', 'peligro');
-      if (!ok) return;
-      estado.clientesActivos = estado.clientesActivos.filter(x => x.id !== c.id);
-      break;
-    }
-
-    case 'terminar':
-      await terminarCliente(c.id, ficha);
-      return;
+    case 'avanzar': avanzar(c); return;
+    case 'atras':   retroceder(c.id); return;
+    case 'nosigo':  noLaSigo(c); return;
+    case 'perdi':   cerrar(c, 'perdi_seguimiento', null, null); return;
   }
   cambio();
 }
 
-/** Termina un cliente: valida, genera los registros y los guarda */
-async function terminarCliente(id, fichaEl) {
-  const tToque = Date.now();                         // instante en que se tocó "Terminar"
-  const c = estado.clientesActivos.find(x => x.id === id);
-  if (!c) return;
+function foto(c) {
+  return { estado: c.estado, cajaIni: c.cajaIni, cajaFin: c.cajaFin, prepIni: c.prepIni, prepFin: c.prepFin };
+}
 
-  if (c.tipo === null) {                             // sin tipo no se puede saber a qué tabla va
-    const seg = fichaEl && fichaEl.querySelector('[data-segmentado]');
+/** Pasa la ficha al estado siguiente. Cada paso se puede deshacer (aviso o flecha de la ficha). */
+function avanzar(c) {
+  if (c.estado === 'caja' && c.tipo === null) {                 // hace falta saber si hay preparación
+    const seg = $(`.cliente[data-id="${c.id}"] [data-segmentado]`);
     if (seg) seg.classList.add('sin-elegir');
-    aviso('Elegí el tipo de preparación: ninguna, individual o por peso.');
+    aviso('Elegí el tipo de preparación (ninguna, individual o por peso) para sacarlo de caja.');
     return;
   }
-
-  // Advertencias que conviene confirmar antes de guardar
-  const adv = [];
-  if (c.cajaIni && !c.cajaFin) adv.push('El cronómetro de caja sigue en marcha: se detiene ahora.');
-  if (c.prepIni && !c.prepFin) adv.push('El cronómetro de preparación sigue en marcha: se detiene ahora.');
-  if (!c.cajaIni) adv.push('No hay tiempo de caja: no se agrega a la tabla de caja.');
-  if (c.tipo !== 0 && !c.prepIni) adv.push('No hay tiempo de preparación: no se agrega a la tabla de preparación.');
-  if (adv.length) {
-    const ok = await preguntar('Revisá antes de guardar', '<ul>' + adv.map(a => `<li>${escapar(a)}</li>`).join('') + '</ul>', 'Guardar igual');
-    if (!ok) return;
+  const ahora = Date.now();
+  const previo = foto(c);
+  let texto = '';
+  switch (c.estado) {
+    case 'fila_caja': c.estado = 'caja'; c.cajaIni = ahora; texto = 'en caja'; break;
+    case 'caja':
+      c.cajaFin = ahora;
+      if (c.tipo === 0) { cerrar(c, 'sin_preparacion', ahora, previo); return; }   // se va: la salida es el fin de caja
+      c.estado = 'fila_prep'; texto = 'en fila de preparación';
+      break;
+    case 'fila_prep': c.estado = 'prep'; c.prepIni = ahora; texto = 'en preparación'; break;
+    case 'prep': c.prepFin = ahora; cerrar(c, 'completo', ahora, previo); return;
   }
+  c.historial.push(previo);
+  cambio();
+  vibrar(15);
+  aviso(`#${c.num}: ${texto}`, { texto: 'Deshacer', fn: () => retroceder(c.id) });
+}
 
-  const copiaFicha = JSON.parse(JSON.stringify(c));  // para poder deshacer
-  if (c.cajaIni && !c.cajaFin) c.cajaFin = tToque;
-  if (c.prepIni && !c.prepFin) c.prepFin = tToque;
+function retroceder(id) {
+  const c = estado.clientesActivos.find(x => x.id === id);
+  if (!c || !c.historial.length) { aviso('No hay un paso para deshacer.'); return; }
+  Object.assign(c, c.historial.pop());
+  cambio();
+  aviso(`#${c.num}: volvió a "${ETIQUETA_ESTADO[c.estado].toLowerCase()}".`);
+}
 
-  const registro = {
-    id: c.id, num: c.num, personas: c.personas, tipo: c.tipo,
+/**
+ * Cierra la ficha y guarda el cliente. Los tiempos que no se midieron quedan vacíos.
+ * "previo" es el estado antes del último toque (para poder reabrir la ficha con "Deshacer").
+ */
+function cerrar(c, cierre, salida, previo) {
+  const copia = Object.assign(copiar(c), previo || {});
+  const reg = {
+    id: c.id, num: c.num, idLlegada: c.idLlegada, t0: c.t0,
     cajaIni: c.cajaIni, cajaFin: c.cajaFin,
     prepIni: c.tipo === 0 ? null : c.prepIni, prepFin: c.tipo === 0 ? null : c.prepFin,
-    terminadoEl: Date.now(), obs: estado.ajustes.observador || '', sync: false
+    salida, personas: c.personas, tipo: c.tipo, comentario: c.comentario, cierre,
+    terminadoEl: Date.now(), obs: estado.ajustes.observador || '', disp: estado.dispositivoId, sync: false
   };
-  estado.clientes.push(registro);
+  estado.clientes.push(reg);
   estado.clientesActivos = estado.clientesActivos.filter(x => x.id !== c.id);
-  if (!estado.clientesActivos.length) crearFicha();   // deja lista una ficha nueva para el próximo cliente
   cambio();
   vibrar(40);
   syncSoon();
-  aviso(`Cliente ${c.num} guardado.`, { texto: 'Deshacer', fn: () => deshacerCliente(registro.id, copiaFicha) });
+  aviso(`Cliente #${c.num} guardado (${NOMBRE_CIERRE[cierre]}).`, { texto: 'Deshacer', fn: () => reabrir(reg.id, copia) });
 }
 
-function deshacerCliente(id, copiaFicha) {
-  const reg = estado.clientes.find(x => x.id === id);
-  if (!reg) return;
-  if (reg.sync) { aviso('Ese cliente ya se envió a Google Sheets: no se puede deshacer desde acá.'); return; }
+function reabrir(id, copia) {
+  if (!estado.clientes.some(x => x.id === id)) return;
   estado.clientes = estado.clientes.filter(x => x.id !== id);
-  // Si la ficha vacía que se creó automáticamente sigue sin usarse, se quita
-  estado.clientesActivos = estado.clientesActivos.filter(f => !(f.personas === 1 && f.tipo === null && !f.cajaIni && !f.prepIni));
-  estado.clientesActivos.unshift(copiaFicha);
+  estado.clientesActivos.push(copia);
   cambio();
-  aviso('Se recuperó la ficha del cliente.');
+  syncSoon();   // si ya se había enviado, el reenvío posterior pisa la fila (el script actualiza por id)
+  aviso(`Se recuperó la ficha #${copia.num}.`);
+}
+
+/** "No voy a seguirla": la ficha desaparece y la llegada queda con seguida = FALSE (cuenta igual para los intervalos) */
+function noLaSigo(c) {
+  const copia = copiar(c);
+  const llegada = estado.llegadas.find(l => l.id === c.idLlegada);
+  if (llegada) { llegada.seguida = false; llegada.sync = false; }
+  estado.clientesActivos = estado.clientesActivos.filter(x => x.id !== c.id);
+  cambio();
+  syncSoon();
+  aviso(`Llegada #${c.num} guardada sin seguimiento.`, { texto: 'Deshacer', fn: () => {
+    if (llegada) { llegada.seguida = true; llegada.sync = false; }
+    estado.clientesActivos.push(copia);
+    cambio();
+    syncSoon();
+  } });
 }
 
 
@@ -579,7 +656,10 @@ function deshacerCliente(id, copiaFicha) {
    ========================================================================== */
 
 function pendientes() {
-  return { llegadas: estado.llegadas.filter(x => !x.sync).length, clientes: estado.clientes.filter(x => !x.sync).length };
+  const llegadas = estado.llegadas.filter(x => !x.sync).length;
+  const clientes = estado.clientes.filter(x => !x.sync).length;
+  const preparadores = estado.preparadores.filter(x => !x.sync).length;
+  return { llegadas, clientes, preparadores, total: llegadas + clientes + preparadores };
 }
 
 function renderDatos() {
@@ -591,22 +671,24 @@ function renderDatos() {
   const p = pendientes();
   $('#tabla-conteos').innerHTML = Object.keys(TABLAS).map(k =>
     `<tr><td>${escapar(TABLAS[k].titulo)}</td><td>${tablas[k].length}</td></tr>`
-  ).join('') + `<tr><td>Clientes con ficha abierta</td><td>${estado.clientesActivos.length}</td></tr>`;
+  ).join('') + `<tr><td>Fichas abiertas</td><td>${estado.clientesActivos.length}</td></tr>`;
 
   $('#resumen-pendientes').textContent = estado.ajustes.sincronizar
-    ? `Sin enviar a Google Sheets: ${p.llegadas} llegadas y ${p.clientes} clientes.`
+    ? `Sin enviar a Google Sheets: ${p.llegadas} llegadas, ${p.clientes} clientes y ${p.preparadores} cambios de preparadores.`
     : 'La sincronización está desactivada: los datos quedan solo en este celular. Exportalos o activá Google Sheets en Ajustes.';
 
-  // Últimos registros (llegadas y clientes mezclados, los más nuevos arriba)
+  // Últimos registros (los más nuevos arriba)
   const items = [
     ...estado.llegadas.map(l => ({ clase: 'llegada', id: l.id, t: l.t, sync: l.sync,
-      titulo: `Llegada ${fmtHora(l.t)}`, sub: '' })),
+      titulo: `Llegada ${fmtHora(l.t)}${l.seguida ? '' : ' (no seguida)'}`, sub: '' })),
     ...estado.clientes.map(c => {
-      const caja = c.cajaIni && c.cajaFin ? `caja ${fmtNumero(segundos(c.cajaFin - c.cajaIni))} s` : 'sin tiempo de caja';
-      const prep = c.tipo !== 0 && c.prepIni && c.prepFin ? `, prep. ${fmtNumero(segundos(c.prepFin - c.prepIni))} s` : '';
+      const sistema = difSeg(c.t0, c.salida);
       return { clase: 'cliente', id: c.id, t: c.terminadoEl, sync: c.sync,
-        titulo: `Cliente ${c.num}: ${c.personas} pers., ${NOMBRE_TIPO[c.tipo].toLowerCase()}`, sub: `${fmtHora(c.terminadoEl)} - ${caja}${prep}` };
-    })
+        titulo: `Cliente #${c.num}: ${c.personas} pers., ${c.tipo === null ? 'sin tipo' : NOMBRE_TIPO[c.tipo].toLowerCase()}`,
+        sub: `${fmtHora(c.terminadoEl)} - ${NOMBRE_CIERRE[c.cierre]}${sistema !== null ? `, ${fmtNumero(sistema)} s en el sistema` : ''}` };
+    }),
+    ...estado.preparadores.map(x => ({ clase: 'prep', id: x.id, t: x.t, sync: x.sync,
+      titulo: `Preparadores: ${x.cantidad}`, sub: fmtHora(x.t) }))
   ].sort((a, b) => b.t - a.t).slice(0, 25);
 
   $('#lista-registros').innerHTML = items.length ? items.map(it => `
@@ -620,14 +702,13 @@ function renderDatos() {
 }
 
 async function borrarRegistro(clase, id) {
-  const lista = clase === 'llegada' ? estado.llegadas : estado.clientes;
-  const it = lista.find(x => x.id === id);
+  const campo = { llegada: 'llegadas', cliente: 'clientes', prep: 'preparadores' }[clase];
+  const it = campo && estado[campo].find(x => x.id === id);
   if (!it) return;
   const extra = it.sync ? '<p>Este registro ya se envió a Google Sheets: la fila queda en la planilla y hay que borrarla ahí a mano.</p>' : '';
-  const ok = await preguntar('¿Borrar este registro?', `<p>Se borra de este celular.</p>${extra}`, 'Borrar', 'peligro');
+  const ok = await preguntar('¿Borrar este registro?', `<p>Se borra de este celular (solo este registro, no los que se relacionan con él).</p>${extra}`, 'Borrar', 'peligro');
   if (!ok) return;
-  if (clase === 'llegada') estado.llegadas = estado.llegadas.filter(x => x.id !== id);
-  else estado.clientes = estado.clientes.filter(x => x.id !== id);
+  estado[campo] = estado[campo].filter(x => x.id !== id);
   cambio();
 }
 
@@ -804,7 +885,7 @@ ${claves.map((k, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.open
 }
 
 async function exportarExcel(compartir) {
-  if (!estado.llegadas.length && !estado.clientes.length) { aviso('Todavía no hay registros para exportar.'); return; }
+  if (!estado.llegadas.length && !estado.clientes.length && !estado.preparadores.length) { aviso('Todavía no hay registros para exportar.'); return; }
   try {
     aviso('Generando el Excel...');
     const blob = await construirXLSX();
@@ -819,33 +900,40 @@ async function exportarExcel(compartir) {
 function armarRespaldo() {
   // Nunca incluye el enlace ni la clave de Sheets: el respaldo se puede mandar por WhatsApp
   return JSON.stringify({
-    app: 'relevamiento-grido', formato: 1, exportadoEl: new Date().toISOString(),
-    llegadas: estado.llegadas, clientes: estado.clientes,
-    clientesActivos: estado.clientesActivos, contadorClientes: estado.contadorClientes
+    app: 'relevamiento-grido', formato: 2, exportadoEl: new Date().toISOString(),
+    llegadas: estado.llegadas, clientes: estado.clientes, preparadores: estado.preparadores,
+    clientesActivos: estado.clientesActivos, contadorClientes: estado.contadorClientes,
+    preparadoresActual: estado.preparadoresActual
   }, null, 1);
+}
+
+/** Agrega a "lista" los registros de "nuevos" cuyo id no estaba. Devuelve cuántos agregó. */
+function fusionar(lista, nuevos) {
+  const ids = new Set(lista.map(x => x.id));
+  let n = 0;
+  (nuevos || []).forEach(x => { if (!ids.has(x.id)) { lista.push(Object.assign({}, x, { sync: false })); n++; } });
+  return n;
 }
 
 async function restaurarRespaldo(archivo) {
   try {
     const dato = JSON.parse(await archivo.text());
-    if (dato.app !== 'relevamiento-grido' || !Array.isArray(dato.llegadas) || !Array.isArray(dato.clientes)) throw new Error('formato');
-    const idsLl = new Set(estado.llegadas.map(x => x.id));
-    const idsCl = new Set(estado.clientes.map(x => x.id));
-    let nuevasLl = 0, nuevosCl = 0;
-    dato.llegadas.forEach(l => { if (!idsLl.has(l.id)) { estado.llegadas.push(Object.assign({}, l, { sync: false })); nuevasLl++; } });
-    dato.clientes.forEach(c => { if (!idsCl.has(c.id)) { estado.clientes.push(Object.assign({}, c, { sync: false })); nuevosCl++; } });
+    if (dato.app !== 'relevamiento-grido' || dato.formato !== 2 || !Array.isArray(dato.llegadas) || !Array.isArray(dato.clientes)) throw new Error('formato');
+    const nl = fusionar(estado.llegadas, dato.llegadas);
+    const nc = fusionar(estado.clientes, dato.clientes);
+    const np = fusionar(estado.preparadores, dato.preparadores);
     estado.contadorClientes = Math.max(estado.contadorClientes, Number(dato.contadorClientes) || 0);
     cambio();
     syncSoon();
-    aviso(`Restaurado: ${nuevasLl} llegadas y ${nuevosCl} clientes nuevos.`);
+    aviso(`Restaurado: ${nl} llegadas, ${nc} clientes y ${np} cambios de preparadores nuevos.`);
   } catch (e) {
-    aviso('Ese archivo no es un respaldo válido de esta app.');
+    aviso('Ese archivo no es un respaldo válido de esta versión de la app.');
   }
 }
 
 async function borrarDatos() {
   const p = pendientes();
-  const sinEnviar = p.llegadas + p.clientes;
+  const sinEnviar = p.total;
   const advertencia = estado.ajustes.sincronizar
     ? (sinEnviar ? `<p><strong>Hay ${sinEnviar} registros sin enviar a Google Sheets.</strong> Si los borrás se pierden.</p>` : '<p>Todo lo cargado ya está en Google Sheets.</p>')
     : '<p><strong>La sincronización está desactivada:</strong> si borrás todo y no exportaste, se pierde.</p>';
@@ -861,9 +949,10 @@ async function borrarDatos() {
   if (r === 'enviados') {
     estado.llegadas = estado.llegadas.filter(x => !x.sync);
     estado.clientes = estado.clientes.filter(x => !x.sync);
+    estado.preparadores = estado.preparadores.filter(x => !x.sync);
   } else if (r === 'todo') {
-    estado.llegadas = []; estado.clientes = []; estado.clientesActivos = [];
-    estado.contadorClientes = 0; estado.proximaEsNuevaSesion = false;
+    estado.llegadas = []; estado.clientes = []; estado.clientesActivos = []; estado.preparadores = [];
+    estado.contadorClientes = 0; estado.preparadoresActual = 0;
   } else return;
   cambio();
   aviso('Datos borrados.');
@@ -872,8 +961,8 @@ async function borrarDatos() {
 
 /* ==========================================================================
    8. SINCRONIZACIÓN CON GOOGLE SHEETS
-   Cada envío es un POST de texto plano (JSON) al script de Google. El script
-   ignora los "id" que ya tiene, así que reenviar nunca duplica filas.
+   Cada envío es un POST de texto plano (JSON) al script de Google. Si el "id"
+   ya existe, el script actualiza esa fila: reenviar nunca duplica filas.
    ========================================================================== */
 
 let sincronizando = false;
@@ -925,18 +1014,25 @@ async function sincronizar(manual) {
   sincronizando = true;
   actualizarChip();
   try {
-    const intervalos = calcularIntervalos();
+    // Se envía el ESTADO ACTUAL de cada registro pendiente (el script actualiza la fila si el id ya existe)
     const pend = [
-      ...estado.llegadas.filter(x => !x.sync).map(x => ({ ref: x, filas: filasDeLlegada(x, intervalos) })),
-      ...estado.clientes.filter(x => !x.sync).map(x => ({ ref: x, filas: filasDeCliente(x) }))
+      ...estado.llegadas.filter(x => !x.sync).map(x => ({ ref: x, tabla: 'llegadas', fila: filaLlegada })),
+      ...estado.clientes.filter(x => !x.sync).map(x => ({ ref: x, tabla: 'clientes', fila: filaCliente })),
+      ...estado.preparadores.filter(x => !x.sync).map(x => ({ ref: x, tabla: 'preparadores', fila: filaPreparadores }))
     ];
     for (let i = 0; i < pend.length; i += LOTE_SYNC) {
       const lote = pend.slice(i, i + LOTE_SYNC);
-      const filas = [];
-      lote.forEach(it => it.filas.forEach(f => filas.push({ tabla: f.tabla, id: it.ref.id, valores: valoresParaEnvio(f.valores) })));
+      const filas = lote.map(it => {
+        const valores = valoresParaEnvio(it.fila(it.ref));
+        it.enviado = JSON.stringify(valores);
+        return { tabla: it.tabla, id: it.ref.id, valores };
+      });
       const resp = await enviarAlScript({ clave: a.claveSheets, filas });
       if (!resp || !resp.ok) throw new Error((resp && resp.error) || 'respuesta inválida');
-      lote.forEach(it => { it.ref.sync = true; });
+      if (resp.actualizadas === undefined) throw new Error('el script de Google es de una versión anterior: pegá el Code.gs nuevo y publicá una nueva versión');
+      if (resp.ignoradas > 0) throw new Error(`el script ignoró ${resp.ignoradas} registros (revisá que sea el Code.gs nuevo)`);
+      // Si el registro cambió mientras se enviaba (ej. pasó a "no seguida"), queda pendiente para reenviarlo
+      lote.forEach(it => { if (JSON.stringify(valoresParaEnvio(it.fila(it.ref))) === it.enviado) it.ref.sync = true; });
       estado.ultimaSyncOk = Date.now();
       guardar();
     }
@@ -971,7 +1067,7 @@ async function probarConexion() {
 function actualizarChip() {
   const chip = $('#chip-sync');
   const p = pendientes();
-  const n = p.llegadas + p.clientes;
+  const n = p.total;
   chip.className = 'chip';
   if (!estado.ajustes.sincronizar) {
     chip.textContent = 'Solo local';
@@ -1115,7 +1211,7 @@ function renderAjustes() {
   const a = estado.ajustes;
   $('#aj-observador').value = a.observador;
   $('#aj-pantalla').checked = a.pantallaEncendida;
-  $('#aj-corte').value = a.cortarSesionMin;
+  $('#aj-foto').value = a.fotoColasMin;
   $('#aj-sync').checked = a.sincronizar;
   $('#aj-url').value = a.urlSheets;
   $('#aj-clave').value = a.claveSheets;
@@ -1129,7 +1225,7 @@ function renderEstadoSync() {
   let t;
   if (!a.sincronizar) t = 'Sincronización desactivada: los datos quedan solo en este celular.';
   else {
-    t = `Sin enviar: ${p.llegadas} llegadas y ${p.clientes} clientes.`;
+    t = `Sin enviar: ${p.llegadas} llegadas, ${p.clientes} clientes y ${p.preparadores} cambios de preparadores.`;
     if (estado.ultimaSyncOk) t += ` Último envío correcto: ${fmtFecha(estado.ultimaSyncOk)}.`;
     if (ultimoErrorSync) t += ` Último error: ${ultimoErrorSync}.`;
   }
@@ -1140,9 +1236,9 @@ function conectarAjustes() {
   const a = estado.ajustes;
   $('#aj-observador').addEventListener('change', e => { a.observador = e.target.value.trim(); guardar(); });
   $('#aj-pantalla').addEventListener('change', e => { a.pantallaEncendida = e.target.checked; guardar(); aplicarPantalla(); });
-  $('#aj-corte').addEventListener('change', e => {
-    const n = Math.max(0, Math.min(240, parseInt(e.target.value, 10) || 0));
-    a.cortarSesionMin = n; e.target.value = n; guardar();
+  $('#aj-foto').addEventListener('change', e => {
+    const n = Math.max(0, Math.min(120, parseInt(e.target.value, 10) || 0));
+    a.fotoColasMin = n; e.target.value = n; guardar(); programarFoto();
   });
   $('#aj-sync').addEventListener('change', e => { a.sincronizar = e.target.checked; cambio(); syncSoon(); });
   $('#aj-url').addEventListener('change', e => { a.urlSheets = e.target.value.trim(); cambio(); syncSoon(); });
@@ -1191,7 +1287,6 @@ function irA(nombre) {
   $$('.navegacion button').forEach(b => {
     if (b.dataset.ir === nombre) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
-  if (nombre === 'atencion' && !estado.clientesActivos.length) crearFicha();   // deja una ficha lista para empezar
   if (nombre === 'ajustes') renderAjustes();
   guardar();
   renderTodo();
@@ -1200,8 +1295,7 @@ function irA(nombre) {
 
 /* ---------- Dibujar todo ---------- */
 function renderTodo() {
-  renderLlegadas();
-  renderAtencion();
+  renderAtencion();   // incluye el resumen de llegadas
   renderDatos();
   renderEstadoSync();
   actualizarChip();
@@ -1215,14 +1309,14 @@ function cambio() {
 
 /* ---------- Arranque ---------- */
 function iniciar() {
-  // Eventos de la pestaña Llegadas
+  // Eventos de la pestaña Atención
   $('#btn-llegada').addEventListener('click', registrarLlegada);
   $('#btn-deshacer-llegada').addEventListener('click', deshacerLlegada);
-  $('#btn-nueva-sesion').addEventListener('click', nuevaSesion);
-
-  // Eventos de la pestaña Atención
-  $('#btn-nuevo-cliente').addEventListener('click', () => { crearFicha(); cambio(); });
+  $('#prep-menos').addEventListener('click', () => cambiarPreparadores(-1));
+  $('#prep-mas').addEventListener('click', () => cambiarPreparadores(1));
   $('#lista-clientes').addEventListener('click', alTocarFicha);
+  $('#lista-clientes').addEventListener('input', alEscribirFicha);
+  $('#aviso-foto-ok').addEventListener('click', () => { $('#aviso-foto').hidden = true; });
 
   // Eventos de la pestaña Datos
   $('#btn-copiar').addEventListener('click', copiarTabla);
@@ -1268,10 +1362,11 @@ function iniciar() {
   window.addEventListener('online', () => sincronizar(false));
   setInterval(() => {
     const p = pendientes();
-    if (estado.ajustes.sincronizar && (p.llegadas + p.clientes) && navigator.onLine) sincronizar(false);
+    if (estado.ajustes.sincronizar && p.total && navigator.onLine) sincronizar(false);
   }, 30000);
 
-  irA(estado.vista in { llegadas: 1, atencion: 1, datos: 1, ajustes: 1 } ? estado.vista : 'llegadas');
+  programarFoto();
+  irA(['atencion', 'datos', 'ajustes'].includes(estado.vista) ? estado.vista : 'atencion');
   aplicarPantalla();
   sincronizar(false);
   if (!almacenamientoOk) aviso('Atención: este navegador no deja guardar datos (¿pestaña privada?). Exportá seguido.');

@@ -7,7 +7,7 @@
    Para forzar que todos los celulares tomen una versión nueva, cambiá VERSION.
    ========================================================================== */
 
-const VERSION = 'relevamiento-1.0.0';
+const VERSION = 'relevamiento-2.0.0';
 
 const ARCHIVOS = [
   './',

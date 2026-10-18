@@ -29,42 +29,46 @@
 
   <main>
 
-    <!-- ====================== PESTAÑA 1: LLEGADAS ====================== -->
-    <section id="vista-llegadas" class="vista" data-vista="llegadas" hidden>
-      <button id="btn-llegada" class="boton-gigante" type="button">
-        <span class="gigante-titulo">Llegó un cliente</span>
-        <span class="gigante-sub" id="llegada-sub">Tocá cada vez que alguien se suma a la fila</span>
-      </button>
+    <!-- ============ PESTAÑA 1: ATENCIÓN (llegadas + fichas de clientes) ============ -->
+    <section id="vista-atencion" class="vista" data-vista="atencion" hidden>
 
-      <div class="tarjeta">
-        <div class="datos-grilla">
-          <div><span class="etiqueta">En esta sesión</span><strong id="ll-total">0</strong></div>
-          <div><span class="etiqueta">Última llegada</span><strong id="ll-ultima">-</strong></div>
-          <div><span class="etiqueta">Último intervalo</span><strong id="ll-intervalo">-</strong></div>
-          <div><span class="etiqueta">Sesiones</span><strong id="ll-sesiones">0</strong></div>
+      <!-- Arriba de todo: registrar llegada y deshacer -->
+      <div class="zona-llegada">
+        <button id="btn-llegada" class="boton-gigante" type="button">
+          <span class="gigante-titulo">Llega alguien</span>
+          <span class="gigante-sub" id="llegada-sub">Tocá cada vez que alguien se suma a la fila</span>
+        </button>
+        <button id="btn-deshacer-llegada" class="boton secundario ancho" type="button">Deshacer última llegada</button>
+      </div>
+
+      <!-- Contador de preparadores -->
+      <div class="tarjeta contador-prep">
+        <span class="etiqueta">Preparadores</span>
+        <div class="contador-controles">
+          <button id="prep-menos" class="boton secundario" type="button" aria-label="Un preparador menos">−</button>
+          <strong id="prep-cantidad">0</strong>
+          <button id="prep-mas" class="boton secundario" type="button" aria-label="Un preparador más">+</button>
         </div>
       </div>
 
-      <div class="fila-botones">
-        <button id="btn-deshacer-llegada" class="boton secundario" type="button">Deshacer última</button>
-        <button id="btn-nueva-sesion" class="boton secundario" type="button">Nueva sesión</button>
-      </div>
-      <p id="aviso-sesion" class="nota" hidden>La próxima llegada abrirá una sesión nueva (no se calcula intervalo contra la anterior).</p>
+      <!-- Fichas de clientes (pequeñas, sin límite). Las dibuja app.js -->
+      <div id="lista-clientes"></div>
 
+      <!-- Abajo de todo: resumen y registro de últimas llegadas -->
+      <div class="tarjeta">
+        <div class="datos-grilla">
+          <div><span class="etiqueta">Llegadas hoy</span><strong id="ll-total">0</strong></div>
+          <div><span class="etiqueta">Última llegada</span><strong id="ll-ultima">-</strong></div>
+          <div><span class="etiqueta">Último intervalo</span><strong id="ll-intervalo">-</strong></div>
+        </div>
+      </div>
       <div class="tarjeta">
         <h2>Últimas llegadas</h2>
         <ol id="lista-llegadas" class="lista-simple"></ol>
       </div>
     </section>
 
-    <!-- ====================== PESTAÑA 2: ATENCIÓN ====================== -->
-    <section id="vista-atencion" class="vista" data-vista="atencion" hidden>
-      <div id="lista-clientes"></div>
-      <button id="btn-nuevo-cliente" class="boton primario ancho" type="button">+ Nuevo cliente</button>
-      <p class="nota">Una ficha por cliente. Podés tener varias abiertas a la vez (por ejemplo, uno en caja y otro en preparación).</p>
-    </section>
-
-    <!-- ====================== PESTAÑA 3: DATOS ====================== -->
+    <!-- ====================== PESTAÑA 2: DATOS ====================== -->
     <section id="vista-datos" class="vista" data-vista="datos" hidden>
       <div class="tarjeta">
         <h2>Registros guardados</h2>
@@ -108,7 +112,7 @@
       </div>
     </section>
 
-    <!-- ====================== PESTAÑA 4: AJUSTES ====================== -->
+    <!-- ====================== PESTAÑA 3: AJUSTES ====================== -->
     <section id="vista-ajustes" class="vista" data-vista="ajustes" hidden>
 
       <div class="tarjeta">
@@ -121,15 +125,16 @@
       </div>
 
       <div class="tarjeta">
-        <h2>Pantalla y sesiones</h2>
+        <h2>Pantalla y fotos de las colas</h2>
         <label class="casilla">
           <input type="checkbox" id="aj-pantalla">
           <span>Mantener la pantalla encendida</span>
         </label>
         <label class="campo-form">
-          <span>Cortar sesión de llegadas tras (minutos sin llegadas, 0 = no cortar)</span>
-          <input type="number" id="aj-corte" min="0" max="240" inputmode="numeric">
+          <span>Recordatorio de foto de las colas cada (minutos, 0 = apagado)</span>
+          <input type="number" id="aj-foto" min="0" max="120" inputmode="numeric">
         </label>
+        <p class="nota">Es solo un aviso discreto: la foto la sacás con la cámara del celular.</p>
       </div>
 
       <div class="tarjeta">
@@ -172,12 +177,14 @@
 
   </main>
 
+  <!-- ====== AVISO DISCRETO DE FOTO DE COLAS (lo muestra app.js; no bloquea nada) ====== -->
+  <div id="aviso-foto" class="aviso-foto" hidden>
+    <span>📷 Foto de las colas</span>
+    <button id="aviso-foto-ok" type="button">Listo</button>
+  </div>
+
   <!-- ====== NAVEGACIÓN INFERIOR (alcanzable con el pulgar) ====== -->
   <nav class="navegacion" aria-label="Secciones">
-    <button type="button" data-ir="llegadas" aria-label="Llegadas">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><path d="M19 7v6M16 10h6"/></svg>
-      <span>Llegadas</span>
-    </button>
     <button type="button" data-ir="atencion" aria-label="Atención">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4.5l3 2M9.5 2.5h5M12 2.5v3.5"/></svg>
       <span>Atención</span>
